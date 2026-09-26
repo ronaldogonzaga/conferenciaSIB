@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Conferência SIB / ANS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <header class="top">
+    <div class="brand">
+      <span class="brand-mark">SIB</span>
+      <div>
+        <h1>Conferência cadastral ANS</h1>
+        <p class="subtitle">Inconsistências entre <strong>cadusu</strong> e <strong>confsib</strong> · v{{ app_version }}</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="db-status" class="status-pill pending">Conectando…</span>
+      <span id="loading" class="status-pill busy hidden" aria-live="polite">
+        <span class="spinner-inline" aria-hidden="true"></span>
+        <span id="loading-text">Atualizando…</span>
+      </span>
+      <button type="button" id="btn-refresh" class="btn primary">Atualizar análise</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stats" id="stats" aria-label="Totais">
+      <article class="stat">
+        <span class="stat-label">cadusu</span>
+        <span class="stat-value" id="st-cadusu">—</span>
+      </article>
+      <article class="stat">
+        <span class="stat-label">confsib</span>
+        <span class="stat-value" id="st-confsib">—</span>
+      </article>
+      <article class="stat">
+        <span class="stat-label">Ativos</span>
+        <span class="stat-value" id="st-ativos">—</span>
+      </article>
+      <article class="stat">
+        <span class="stat-label">Inativos</span>
+        <span class="stat-value" id="st-inativos">—</span>
+      </article>
+      <article class="stat accent">
+        <span class="stat-label">Regras com inconsistência</span>
+        <span class="stat-value" id="st-regras-bad">—</span>
+      </article>
+      <article class="stat accent">
+        <span class="stat-label">Registros flagados</span>
+        <span class="stat-value" id="st-flagados">—</span>
+      </article>
+    </section>
+
+    <section class="layout">
+      <aside class="panel rules-panel">
+        <div class="panel-head">
+          <h2>Regras de validação</h2>
+          <div class="filters">
+            <select id="filter-severity" aria-label="Filtrar severidade">
+              <option value="">Todas severidades</option>
+              <option value="critica">Crítica</option>
+              <option value="alta">Alta</option>
+              <option value="media">Média</option>
+              <option value="baixa">Baixa</option>
+            </select>
+            <select id="filter-status" aria-label="Filtrar status">
+              <option value="">Todos status</option>
+              <option value="bad">Com inconsistência</option>
+              <option value="ok">Zeradas (OK)</option>
+            </select>
+          </div>
+        </div>
+        <div id="rules-list" class="rules-list" role="list"></div>
+      </aside>
+
+      <section class="panel detail-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow" id="detail-category">Selecione uma regra</p>
+            <h2 id="detail-title">Detalhamento</h2>
+          </div>
+          <div class="top-actions">
+            <button type="button" id="btn-fix" class="btn warn hidden">Sugerir correção</button>
+            <a id="btn-export" class="btn ghost hidden" href="#" download>Exportar CSV</a>
+          </div>
+        </div>
+        <p id="detail-desc" class="detail-desc">
+          Execute a análise e escolha uma regra à esquerda para ver os beneficiários inconsistentes.
+        </p>
+        <div id="fix-hint" class="fix-hint hidden"></div>
+        <div id="detail-meta" class="detail-meta hidden"></div>
+        <div id="detail-error" class="alert error hidden"></div>
+        <div id="detail-ok" class="alert ok hidden"></div>
+        <div class="table-wrap">
+          <table id="detail-table" class="data-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+          <p id="detail-empty" class="empty-state">Nenhum registro para exibir.</p>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Operadora · Adequação SIB/ANS · Processamento local Flask</span>
+  </footer>
+
+  <div id="fix-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="fix-modal-title">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Preview da correção</p>
+          <h2 id="fix-modal-title">Sugestão</h2>
+        </div>
+        <button type="button" id="btn-fix-close" class="btn ghost" aria-label="Fechar">Fechar</button>
+      </div>
+      <p id="fix-modal-summary" class="detail-desc"></p>
+      <div class="modal-toolbar">
+        <label class="check-all">
+          <input type="checkbox" id="fix-check-all" checked />
+          Selecionar todos
+        </label>
+        <span id="fix-modal-meta" class="muted"></span>
+      </div>
+      <div class="table-wrap modal-table">
+        <table id="fix-table" class="data-table">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="modal-foot">
+        <p class="muted">Nada é gravado até você confirmar. UPDATE apenas em <strong>cadusu</strong>.</p>
+        <div class="top-actions">
+          <button type="button" id="btn-fix-cancel" class="btn ghost">Cancelar</button>
+          <button type="button" id="btn-fix-apply" class="btn danger">Gravar selecionados</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
