@@ -2,6 +2,13 @@
 cd /d "%~dp0"
 
 SET "VENV_DIR=%~dp0venv"
+SET "APP_PORT=5000"
+
+IF EXIST "%~dp0.env" (
+    FOR /F "usebackq tokens=1,* delims==" %%A IN ("%~dp0.env") DO (
+        IF /I "%%A"=="FLASK_PORT" SET "APP_PORT=%%B"
+    )
+)
 
 IF NOT EXIST "%VENV_DIR%\Scripts\python.exe" (
     ECHO Criando ambiente virtual em venv...
@@ -31,5 +38,7 @@ IF ERRORLEVEL 1 (
 
 ECHO.
 ECHO Iniciando Conferencia SIB/ANS...
+ECHO Abrindo http://127.0.0.1:%APP_PORT%/ no navegador...
+START "" CMD /C "TIMEOUT /T 2 /NOBREAK >NUL & START http://127.0.0.1:%APP_PORT%/"
 python app.py
 PAUSE
