@@ -25,3 +25,14 @@ class Config:
     FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
     MAX_ROWS = int(os.getenv("MAX_ROWS", "500"))
     APP_VERSION = APP_VERSION
+    PENDING_CONFSIB_DB = os.getenv(
+        "PENDING_CONFSIB_DB",
+        str(BASE_DIR / "data" / "pending_confsib.db"),
+    )
+    PENDING_CONFSIB_WAIT_DAYS = int(os.getenv("PENDING_CONFSIB_WAIT_DAYS", "45"))
+    # Caminho padrão sugerido na UI para o retorno SIB (.RPX)
+    RPX_DEFAULT_PATH = os.getenv(
+        "RPX_DEFAULT_PATH",
+        r"\\10.0.0.205\c$\Mplan",
+    )
+    RPX_MAX_ROWS = int(os.getenv("RPX_MAX_ROWS", "2000"))

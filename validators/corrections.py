@@ -5,16 +5,37 @@ from typing import Any
 
 from config import Config
 from db import execute_returning, fetch_all, fetch_count
+from pending_confsib import (
+    inject_pending_exclusion,
+    is_await_rule,
+    register_pending,
+    sql_exclude_pending,
+)
 from validators.sib_rules import (
     ANS_FLEX_ALGUM_MARCADO_C,
     ATIVO_SIB_CAMPOS_AUSENTES,
+    CAMPOS_OBRIGATORIOS_ANS_OK,
+    CODUSU_IGUAL_CONFSIB,
     CONFSIB_LATERAL,
     CONFSIB_LATERAL_IDENTIDADE,
+    CONFSIB_LATEST_BY_CCO,
     CONFSIB_PODE_PREENCHER_SIB,
+    DATAINI_CONFSIB,
+    DATAINI_IGUAL_CONFSIB,
+    DIVERGENCIA_NOME_CADUSU_FILTRO,
+    DIVERGENCIA_NOME_CADUSU_FILTRO_C2,
+    EXTRA_SEM_MESMO_REGISTRO_REINCLUSAO,
+    PRAZO_ENVIO_DATAINI_VENCIDO,
+    IDENTIDADE_VALIDACAO_COMPLETA,
+    MESMO_REGISTRO_EXATO,
     NASC_CONFSIB,
+    NASC_IGUAL,
     SIB_FLEX_ALGUM_DIFF,
     SIB_FLEX_FLAG_CASE,
     SIB_FLEX_PREVIEW_FLAGS,
+    ids_sql_fix_ativo_cadusu_inativo_confsib,
+    ids_sql_fix_ativo_inativo_confsib,
+    ids_sql_fix_inativo_ativo_confsib,
 )
 
 
@@ -206,34 +227,77 @@ FIX_PLANS: dict[str, FixPlan] = {
     "reinclusao_antiga_com_cco": FixPlan(
         rule_id="reinclusao_antiga_com_cco",
         label="Ajustar POSANS para 4-ATUALIZADO",
-        summary="Reinclusão antiga (>90 dias) com CCO → posans = 4-ATUALIZADO.",
-        fields=("posans",),
+        summary=(
+            "Reinclusão antiga (>90 dias) com CCO → posans = 4-ATUALIZADO. "
+            "Com match exato (CCO+nome+CPF+nasc+dataini) e datafim na cadusu: limpa datafim. "
+            "Não aplica a quem está em reinclusão intencional por match exato "
+            "com confsib inativa (regra de mesmo registro)."
+        ),
+        fields=("posans", "datafim"),
         preview_sql=f"""
-            SELECT id, codtit, codusu, nomeusu, situusu, codcco, dataini,
-                   posans AS posans_atual,
-                   '4-ATUALIZADO'::varchar AS posans_novo
-            FROM cadusu
-            WHERE dataini < CURRENT_DATE - INTERVAL '90 days'
-              AND posans = '8-REINCLUSAO'
-              AND COALESCE(TRIM(codcco), '') <> ''
-            ORDER BY id
+            SELECT c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.codcco, c.dataini,
+                   c.posans AS posans_atual,
+                   '4-ATUALIZADO'::varchar AS posans_novo,
+                   c.datafim AS datafim_atual,
+                   CASE
+                     WHEN c.datafim IS NOT NULL
+                      AND EXISTS (
+                        SELECT 1
+                        FROM (
+                            {CONFSIB_LATEST_BY_CCO}
+                        ) s
+                        WHERE s.codcco = c.codcco
+                          AND {MESMO_REGISTRO_EXATO}
+                      )
+                     THEN NULL::date
+                     ELSE c.datafim
+                   END AS datafim_novo,
+                   s.status AS status_ans,
+                   s.nomeusu AS nome_ans,
+                   s.dataini AS dataini_ans,
+                   s.datafim AS datafim_ans
+            FROM cadusu c
+            LEFT JOIN (
+                {CONFSIB_LATEST_BY_CCO}
+            ) s ON s.codcco = c.codcco
+            WHERE c.dataini < CURRENT_DATE - INTERVAL '90 days'
+              AND c.posans = '8-REINCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              {EXTRA_SEM_MESMO_REGISTRO_REINCLUSAO}
+            ORDER BY c.id
             {_limit()}
         """,
         apply_sql=f"""
-            UPDATE cadusu SET
+            UPDATE cadusu c SET
                 posans = '4-ATUALIZADO',
+                datafim = CASE
+                  WHEN c.datafim IS NOT NULL
+                   AND EXISTS (
+                     SELECT 1
+                     FROM (
+                         {CONFSIB_LATEST_BY_CCO}
+                     ) s
+                     WHERE s.codcco = c.codcco
+                       AND {MESMO_REGISTRO_EXATO}
+                   )
+                  THEN NULL
+                  ELSE c.datafim
+                END,
                 {_AUDIT}
-            WHERE id = ANY(%s)
-              AND dataini < CURRENT_DATE - INTERVAL '90 days'
-              AND posans = '8-REINCLUSAO'
-              AND COALESCE(TRIM(codcco), '') <> ''
-            RETURNING id, codtit, codusu, nomeusu, posans
+            WHERE c.id = ANY(%s)
+              AND c.dataini < CURRENT_DATE - INTERVAL '90 days'
+              AND c.posans = '8-REINCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              {EXTRA_SEM_MESMO_REGISTRO_REINCLUSAO}
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.posans, c.datafim
         """,
-        count_sql="""
-            SELECT COUNT(*) AS total FROM cadusu
-            WHERE dataini < CURRENT_DATE - INTERVAL '90 days'
-              AND posans = '8-REINCLUSAO'
-              AND COALESCE(TRIM(codcco), '') <> ''
+        count_sql=f"""
+            SELECT COUNT(*) AS total
+            FROM cadusu c
+            WHERE c.dataini < CURRENT_DATE - INTERVAL '90 days'
+              AND c.posans = '8-REINCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              {EXTRA_SEM_MESMO_REGISTRO_REINCLUSAO}
         """,
     ),
     "inclusao_antiga_com_cco": FixPlan(
@@ -306,19 +370,23 @@ FIX_PLANS: dict[str, FixPlan] = {
         rule_id="ativo_sem_cco_fora_inclusao",
         label="Ajustar POSANS para 1-INCLUSAO",
         summary=(
-            "ATIVO sem CCO com CPF → posans = 1-INCLUSAO. "
+            "ATIVO sem CCO com CPF e prazo ANS da dataini já vencido "
+            "→ posans = 1-INCLUSAO "
+            "(inclui quem estava indevidamente em 8-REINCLUSAO sem CCO). "
+            "Dentro do prazo (até o dia 5 do mês seguinte à dataini) não lista. "
             "Não aplica sem CPF (ANS não acata inclusão sem CPF para gerar CCO)."
         ),
         fields=("posans",),
         preview_sql=f"""
-            SELECT id, codtit, codusu, nomeusu, situusu, cpfusu, codcco,
+            SELECT id, codtit, codusu, nomeusu, situusu, cpfusu, codcco, dataini,
                    posans AS posans_atual,
                    '1-INCLUSAO'::varchar AS posans_novo
             FROM cadusu
             WHERE situusu = 'ATIVO'
               AND COALESCE(TRIM(codcco), '') = ''
               AND COALESCE(TRIM(cpfusu), '') <> ''
-              AND posans NOT IN ('1-INCLUSAO', '8-REINCLUSAO')
+              AND posans <> '1-INCLUSAO'
+              AND {PRAZO_ENVIO_DATAINI_VENCIDO}
             ORDER BY id
             {_limit()}
         """,
@@ -330,15 +398,17 @@ FIX_PLANS: dict[str, FixPlan] = {
               AND situusu = 'ATIVO'
               AND COALESCE(TRIM(codcco), '') = ''
               AND COALESCE(TRIM(cpfusu), '') <> ''
-              AND posans NOT IN ('1-INCLUSAO', '8-REINCLUSAO')
-            RETURNING id, codtit, codusu, nomeusu, cpfusu, posans
+              AND posans <> '1-INCLUSAO'
+              AND {PRAZO_ENVIO_DATAINI_VENCIDO}
+            RETURNING id, codtit, codusu, nomeusu, cpfusu, codcco, posans
         """,
-        count_sql="""
+        count_sql=f"""
             SELECT COUNT(*) AS total FROM cadusu
             WHERE situusu = 'ATIVO'
               AND COALESCE(TRIM(codcco), '') = ''
               AND COALESCE(TRIM(cpfusu), '') <> ''
-              AND posans NOT IN ('1-INCLUSAO', '8-REINCLUSAO')
+              AND posans <> '1-INCLUSAO'
+              AND {PRAZO_ENVIO_DATAINI_VENCIDO}
         """,
     ),
     "ativo_com_cco_exclusao": FixPlan(
@@ -377,35 +447,208 @@ FIX_PLANS: dict[str, FixPlan] = {
     ),
     "inativo_com_cco_nao_excluido": FixPlan(
         rule_id="inativo_com_cco_nao_excluido",
-        label="Ajustar POSANS para 3-EXCLUSAO",
-        summary="INATIVO com CCO pendente de baixa na ANS → posans = 3-EXCLUSAO.",
+        label="Conciliar POSANS (3-EXCLUSAO ou 4-ATUALIZADO)",
+        summary=(
+            "INATIVO com CCO: se confsib status=I → posans=4-ATUALIZADO "
+            "(nao gerar exclusao de quem ja esta inativo na ANS); "
+            "se confsib status=A ou sem retorno → posans=3-EXCLUSAO."
+        ),
         fields=("posans",),
         preview_sql=f"""
-            SELECT id, codtit, codusu, nomeusu, situusu, codcco, datafim,
-                   posans AS posans_atual,
-                   '3-EXCLUSAO'::varchar AS posans_novo
-            FROM cadusu
-            WHERE situusu = 'INATIVO'
-              AND COALESCE(TRIM(codcco), '') <> ''
-              AND posans NOT IN ('3-EXCLUSAO', '4-ATUALIZADO')
-            ORDER BY id
+            SELECT c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.codcco, c.datafim,
+                   c.posans AS posans_atual,
+                   s.status AS status_ans,
+                   CASE
+                     WHEN s.codcco IS NOT NULL AND TRIM(s.status) = 'I'
+                       THEN '4-ATUALIZADO'
+                     ELSE '3-EXCLUSAO'
+                   END AS posans_novo
+            FROM cadusu c
+            LEFT JOIN (
+                {CONFSIB_LATEST_BY_CCO}
+            ) s ON s.codcco = c.codcco
+            WHERE c.situusu = 'INATIVO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND c.posans NOT IN ('3-EXCLUSAO', '4-ATUALIZADO')
+            ORDER BY c.id
             {_limit()}
         """,
         apply_sql=f"""
-            UPDATE cadusu SET
-                posans = '3-EXCLUSAO',
+            UPDATE cadusu c SET
+                posans = CASE
+                  WHEN EXISTS (
+                    SELECT 1
+                    FROM (
+                        {CONFSIB_LATEST_BY_CCO}
+                    ) s
+                    WHERE s.codcco = c.codcco
+                      AND TRIM(s.status) = 'I'
+                  ) THEN '4-ATUALIZADO'
+                  ELSE '3-EXCLUSAO'
+                END,
                 {_AUDIT}
-            WHERE id = ANY(%s)
-              AND situusu = 'INATIVO'
-              AND COALESCE(TRIM(codcco), '') <> ''
-              AND posans NOT IN ('3-EXCLUSAO', '4-ATUALIZADO')
-            RETURNING id, codtit, codusu, nomeusu, posans
+            WHERE c.id = ANY(%s)
+              AND c.situusu = 'INATIVO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND c.posans NOT IN ('3-EXCLUSAO', '4-ATUALIZADO')
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.posans
         """,
         count_sql="""
             SELECT COUNT(*) AS total FROM cadusu
             WHERE situusu = 'INATIVO'
               AND COALESCE(TRIM(codcco), '') <> ''
               AND posans NOT IN ('3-EXCLUSAO', '4-ATUALIZADO')
+        """,
+    ),
+    "exclusao_cco_ja_inativo_confsib": FixPlan(
+        rule_id="exclusao_cco_ja_inativo_confsib",
+        label="Ajustar POSANS para 4-ATUALIZADO",
+        summary=(
+            "3-EXCLUSAO com CCO ja inativo na confsib (status=I): "
+            "posans = 4-ATUALIZADO. Nao reenviar exclusao (rejeicao ANS)."
+        ),
+        fields=("posans",),
+        preview_sql=f"""
+            SELECT c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.codcco, c.datafim,
+                   c.posans AS posans_atual,
+                   '4-ATUALIZADO'::varchar AS posans_novo,
+                   s.status AS status_ans
+            FROM cadusu c
+            INNER JOIN (
+                {CONFSIB_LATEST_BY_CCO}
+            ) s ON s.codcco = c.codcco
+            WHERE c.posans = '3-EXCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND TRIM(s.status) = 'I'
+            ORDER BY c.id
+            {_limit()}
+        """,
+        apply_sql=f"""
+            UPDATE cadusu c SET
+                posans = '4-ATUALIZADO',
+                {_AUDIT}
+            WHERE c.id = ANY(%s)
+              AND c.posans = '3-EXCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND EXISTS (
+                SELECT 1
+                FROM (
+                    {CONFSIB_LATEST_BY_CCO}
+                ) s
+                WHERE s.codcco = c.codcco
+                  AND TRIM(s.status) = 'I'
+              )
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.codcco, c.posans
+        """,
+        count_sql=f"""
+            SELECT COUNT(*) AS total
+            FROM cadusu c
+            INNER JOIN (
+                {CONFSIB_LATEST_BY_CCO}
+            ) s ON s.codcco = c.codcco
+            WHERE c.posans = '3-EXCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND TRIM(s.status) = 'I'
+        """,
+    ),
+    "cpf_inclusao_ja_ativo_confsib": FixPlan(
+        rule_id="cpf_inclusao_ja_ativo_confsib",
+        label="Vincular CCO da confsib (mesma pessoa)",
+        summary=(
+            "1-INCLUSAO sem CCO com CPF ativo na confsib e mesma pessoa "
+            "(dataini e nome iguais): copia CODCCO da confsib e posans=4-ATUALIZADO. "
+            "Campos divergentes (ex. dataini) sao inclusao nova e nao entram na regra."
+        ),
+        fields=("codcco", "posans"),
+        preview_sql=f"""
+            SELECT c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.cpfusu,
+                   c.dataini, ({DATAINI_CONFSIB}) AS dataini_ans,
+                   c.codcco AS codcco_atual,
+                   TRIM(s.codcco) AS codcco_novo,
+                   c.posans AS posans_atual,
+                   '4-ATUALIZADO'::varchar AS posans_novo,
+                   s.codusu AS codusu_conflito
+            FROM cadusu c
+            INNER JOIN LATERAL (
+                SELECT s0.*
+                FROM confsib s0
+                WHERE TRIM(COALESCE(s0.cpfusu, '')) = TRIM(COALESCE(c.cpfusu, ''))
+                  AND TRIM(s0.status) = 'A'
+                  AND COALESCE(TRIM(s0.codcco), '') <> ''
+                ORDER BY s0.numseq DESC
+                LIMIT 1
+            ) s ON TRUE
+            WHERE c.situusu = 'ATIVO'
+              AND c.posans = '1-INCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') = ''
+              AND LENGTH(
+                    REGEXP_REPLACE(COALESCE(c.cpfusu, ''), '[^0-9]', '', 'g')
+                  ) = 11
+              AND {DATAINI_IGUAL_CONFSIB}
+              AND COALESCE(TRIM(c.nomeusu), '') <> ''
+              AND COALESCE(TRIM(s.nomeusu), '') <> ''
+              AND UPPER(TRIM(c.nomeusu)) = UPPER(TRIM(s.nomeusu))
+            ORDER BY c.id
+            {_limit()}
+        """,
+        apply_sql=f"""
+            UPDATE cadusu c SET
+                codcco = sub.cco_novo,
+                posans = '4-ATUALIZADO',
+                {_AUDIT}
+            FROM (
+                SELECT c2.id, TRIM(s.codcco) AS cco_novo
+                FROM cadusu c2
+                INNER JOIN LATERAL (
+                    SELECT s0.*
+                    FROM confsib s0
+                    WHERE TRIM(COALESCE(s0.cpfusu, '')) = TRIM(COALESCE(c2.cpfusu, ''))
+                      AND TRIM(s0.status) = 'A'
+                      AND COALESCE(TRIM(s0.codcco), '') <> ''
+                    ORDER BY s0.numseq DESC
+                    LIMIT 1
+                ) s ON TRUE
+                WHERE c2.id = ANY(%s)
+                  AND c2.situusu = 'ATIVO'
+                  AND c2.posans = '1-INCLUSAO'
+                  AND COALESCE(TRIM(c2.codcco), '') = ''
+                  AND LENGTH(
+                        REGEXP_REPLACE(COALESCE(c2.cpfusu, ''), '[^0-9]', '', 'g')
+                      ) = 11
+                  AND c2.dataini IS NOT NULL
+                  AND ({DATAINI_CONFSIB}) IS NOT NULL
+                  AND ({DATAINI_CONFSIB}) = c2.dataini
+                  AND COALESCE(TRIM(c2.nomeusu), '') <> ''
+                  AND COALESCE(TRIM(s.nomeusu), '') <> ''
+                  AND UPPER(TRIM(c2.nomeusu)) = UPPER(TRIM(s.nomeusu))
+            ) sub
+            WHERE c.id = sub.id
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.codcco, c.posans, c.dataini
+        """,
+        count_sql=f"""
+            SELECT COUNT(*) AS total FROM (
+                SELECT c.id
+                FROM cadusu c
+                INNER JOIN LATERAL (
+                    SELECT s0.*
+                    FROM confsib s0
+                    WHERE TRIM(COALESCE(s0.cpfusu, '')) = TRIM(COALESCE(c.cpfusu, ''))
+                      AND TRIM(s0.status) = 'A'
+                      AND COALESCE(TRIM(s0.codcco), '') <> ''
+                    ORDER BY s0.numseq DESC
+                    LIMIT 1
+                ) s ON TRUE
+                WHERE c.situusu = 'ATIVO'
+                  AND c.posans = '1-INCLUSAO'
+                  AND COALESCE(TRIM(c.codcco), '') = ''
+                  AND LENGTH(
+                        REGEXP_REPLACE(COALESCE(c.cpfusu, ''), '[^0-9]', '', 'g')
+                      ) = 11
+                  AND {DATAINI_IGUAL_CONFSIB}
+                  AND COALESCE(TRIM(c.nomeusu), '') <> ''
+                  AND COALESCE(TRIM(s.nomeusu), '') <> ''
+                  AND UPPER(TRIM(c.nomeusu)) = UPPER(TRIM(s.nomeusu))
+            ) q
         """,
     ),
     "exclusao_sem_datafim_nao_inativo": FixPlan(
@@ -524,65 +767,93 @@ FIX_PLANS: dict[str, FixPlan] = {
     ),
     "divergencia_nome_cadusu_confsib": FixPlan(
         rule_id="divergencia_nome_cadusu_confsib",
-        label="Enviar nome à ANS (SIB-FLEX)",
+        label="Enviar nome da cadusu à ANS (SIB-FLEX)",
         summary=(
-            "situusu ≠ INATIVO: posans = 10-SIB-FLEX e ansnome = 1 "
-            "(qualquer codusu; anstitular não é usado)."
+            "Preserva cadusu.nomeusu (ja validado por humano na RF). "
+            "Nao acata confsib.nomeusu. "
+            "Prepara envio: ansnome=1 e posans=10-SIB-FLEX "
+            "(atualiza a ANS/confsib na proxima competencia). "
+            "Se titular (codusu=00) e cadcont.nometit divergir do nomeusu local, "
+            "atualiza nometit com o nome local."
         ),
-        fields=("posans", "ansnome"),
+        fields=("ansnome", "posans", "nometit"),
         preview_sql=f"""
             SELECT DISTINCT ON (c.id)
                    c.id, c.codtit, c.codusu, c.codcco, c.situusu,
-                   c.nomeusu AS nome_local, s.nomeusu AS nome_ans,
+                   c.nomeusu AS nomeusu_mantido,
+                   s.nomeusu AS nome_ans_ignorado,
+                   c.ansnome AS ansnome_atual,
+                   '1'::varchar AS ansnome_novo,
                    c.posans AS posans_atual,
                    '10-SIB-FLEX'::varchar AS posans_novo,
-                   c.ansnome AS ansnome_atual,
-                   '1'::varchar AS ansnome_novo
+                   ct.nometit AS nometit_atual,
+                   CASE
+                     WHEN TRIM(c.codusu) = '00'
+                          AND ct.codtit IS NOT NULL
+                          AND UPPER(TRIM(COALESCE(ct.nometit, '')))
+                              <> UPPER(TRIM(COALESCE(c.nomeusu, '')))
+                       THEN LEFT(TRIM(c.nomeusu), 80)
+                     ELSE NULL
+                   END AS nometit_novo
             FROM cadusu c
             INNER JOIN confsib s ON s.codcco = c.codcco
-            WHERE COALESCE(c.codcco, '') <> ''
-              AND c.situusu <> 'INATIVO'
-              AND UPPER(TRIM(COALESCE(c.nomeusu, '')))
-                  <> UPPER(TRIM(COALESCE(s.nomeusu, '')))
-              AND NOT (
-                    c.posans = '10-SIB-FLEX'
-                AND COALESCE(TRIM(c.ansnome), '') = '1'
-              )
+            LEFT JOIN cadcont ct ON ct.codtit = c.codtit
+            WHERE {DIVERGENCIA_NOME_CADUSU_FILTRO}
             ORDER BY c.id, s.numseq DESC
             {_limit()}
         """,
         apply_sql=f"""
-            UPDATE cadusu c SET
-                posans = '10-SIB-FLEX',
-                ansnome = '1',
-                {_AUDIT}
-            WHERE c.id = ANY(%s)
-              AND COALESCE(c.codcco, '') <> ''
-              AND c.situusu <> 'INATIVO'
-              AND NOT (
-                    c.posans = '10-SIB-FLEX'
-                AND COALESCE(TRIM(c.ansnome), '') = '1'
-              )
-              AND EXISTS (
-                SELECT 1 FROM confsib s
-                WHERE s.codcco = c.codcco
-                  AND UPPER(TRIM(COALESCE(c.nomeusu, '')))
-                      <> UPPER(TRIM(COALESCE(s.nomeusu, '')))
-              )
-            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.posans, c.ansnome
+            WITH sub AS (
+                SELECT DISTINCT ON (c2.id)
+                       c2.id,
+                       c2.codtit,
+                       c2.codusu,
+                       LEFT(TRIM(c2.nomeusu), 80) AS nome_local
+                FROM cadusu c2
+                INNER JOIN confsib s ON s.codcco = c2.codcco
+                LEFT JOIN cadcont ct ON ct.codtit = c2.codtit
+                WHERE c2.id = ANY(%s)
+                  AND {DIVERGENCIA_NOME_CADUSU_FILTRO_C2}
+                ORDER BY c2.id, s.numseq DESC
+            ),
+            upd_usu AS (
+                UPDATE cadusu c SET
+                    ansnome = '1',
+                    posans = '10-SIB-FLEX',
+                    {_AUDIT}
+                FROM sub
+                WHERE c.id = sub.id
+                RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.ansnome, c.posans, c.situusu
+            ),
+            upd_cont AS (
+                UPDATE cadcont ct SET
+                    nometit = u.nomeusu,
+                    dtope = CURRENT_TIMESTAMP
+                FROM upd_usu u
+                WHERE TRIM(u.codusu) = '00'
+                  AND ct.codtit = u.codtit
+                  AND UPPER(TRIM(COALESCE(ct.nometit, '')))
+                      <> UPPER(TRIM(COALESCE(u.nomeusu, '')))
+                RETURNING ct.codtit
+            )
+            SELECT u.id, u.codtit, u.codusu, u.nomeusu, u.ansnome, u.posans, u.situusu,
+                   CASE
+                     WHEN EXISTS (
+                       SELECT 1 FROM upd_cont x WHERE x.codtit = u.codtit
+                     ) THEN 'sim'
+                     ELSE 'nao'
+                   END AS nometit_atualizado
+            FROM upd_usu u
         """,
-        count_sql="""
-            SELECT COUNT(DISTINCT c.id) AS total
-            FROM cadusu c
-            INNER JOIN confsib s ON s.codcco = c.codcco
-            WHERE COALESCE(c.codcco, '') <> ''
-              AND c.situusu <> 'INATIVO'
-              AND UPPER(TRIM(COALESCE(c.nomeusu, '')))
-                  <> UPPER(TRIM(COALESCE(s.nomeusu, '')))
-              AND NOT (
-                    c.posans = '10-SIB-FLEX'
-                AND COALESCE(TRIM(c.ansnome), '') = '1'
-              )
+        count_sql=f"""
+            SELECT COUNT(*) AS total FROM (
+                SELECT DISTINCT ON (c.id) c.id
+                FROM cadusu c
+                INNER JOIN confsib s ON s.codcco = c.codcco
+                LEFT JOIN cadcont ct ON ct.codtit = c.codtit
+                WHERE {DIVERGENCIA_NOME_CADUSU_FILTRO}
+                ORDER BY c.id, s.numseq DESC
+            ) q
         """,
     ),
     "divergencia_nome_inativo_confsib": FixPlan(
@@ -800,7 +1071,7 @@ FIX_PLANS: dict[str, FixPlan] = {
         fields=("cpfusu",),
         preview_sql=f"""
             WITH base AS (
-                SELECT id, codtit, codusu, nomeusu, cpfusu, nascusu,
+                SELECT id, codtit, codusu, nomeusu, cpfusu, nascusu, dataini,
                        posans, codcco,
                        LEFT(codtit, 4) AS empresa,
                        TRIM(cpfusu) AS cpf
@@ -835,7 +1106,7 @@ FIX_PLANS: dict[str, FixPlan] = {
                          b.id
             )
             SELECT b.id, b.empresa, b.codtit, b.codusu, b.nomeusu,
-                   b.codcco, b.posans, b.nascusu,
+                   b.codcco, b.posans, b.dataini, b.nascusu,
                    b.cpfusu AS cpfusu_atual,
                    NULL::varchar AS cpfusu_novo,
                    k.id_mantido, k.nome_mantido, k.nasc_mantido
@@ -1154,6 +1425,65 @@ FIX_PLANS: dict[str, FixPlan] = {
               AND COALESCE(TRIM(codcco), '') <> ''
         """,
     ),
+    "reativacao_cco_ja_ativo_confsib": FixPlan(
+        rule_id="reativacao_cco_ja_ativo_confsib",
+        label="Alinhar ao ativo da ANS (ATIVO + 4-ATUALIZADO)",
+        summary=(
+            "8-REINCLUSAO/9-RET REATIV com CCO ja ativo na confsib (status=A): "
+            "situusu=ATIVO, posans=4-ATUALIZADO e datafim limpa. "
+            "Nao reenviar reativacao (rejeicao ANS)."
+        ),
+        fields=("situusu", "posans", "datafim"),
+        preview_sql=f"""
+            SELECT c.id, c.codtit, c.codusu, c.nomeusu, c.codcco,
+                   c.situusu AS situusu_atual,
+                   'ATIVO'::varchar AS situusu_novo,
+                   c.posans AS posans_atual,
+                   '4-ATUALIZADO'::varchar AS posans_novo,
+                   c.datafim AS datafim_atual,
+                   NULL::date AS datafim_novo,
+                   s.status AS status_ans
+            FROM cadusu c
+            INNER JOIN (
+                {CONFSIB_LATEST_BY_CCO}
+            ) s ON s.codcco = c.codcco
+            WHERE c.posans IN ('8-REINCLUSAO', '9-RET REATIV')
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND TRIM(s.status) = 'A'
+            ORDER BY c.id
+            {_limit()}
+        """,
+        apply_sql=f"""
+            UPDATE cadusu c SET
+                situusu = 'ATIVO',
+                posans = '4-ATUALIZADO',
+                datafim = NULL,
+                {_AUDIT}
+            WHERE c.id = ANY(%s)
+              AND c.posans IN ('8-REINCLUSAO', '9-RET REATIV')
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND EXISTS (
+                SELECT 1
+                FROM (
+                    {CONFSIB_LATEST_BY_CCO}
+                ) s
+                WHERE s.codcco = c.codcco
+                  AND TRIM(s.status) = 'A'
+              )
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.situusu,
+                      c.codcco, c.posans, c.datafim
+        """,
+        count_sql=f"""
+            SELECT COUNT(*) AS total
+            FROM cadusu c
+            INNER JOIN (
+                {CONFSIB_LATEST_BY_CCO}
+            ) s ON s.codcco = c.codcco
+            WHERE c.posans IN ('8-REINCLUSAO', '9-RET REATIV')
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND TRIM(s.status) = 'A'
+        """,
+    ),
     "sib_flex_sem_campo_marcado": FixPlan(
         rule_id="sib_flex_sem_campo_marcado",
         label="Marcar flags ANS pelas divergências confsib",
@@ -1413,6 +1743,191 @@ FIX_PLANS: dict[str, FixPlan] = {
               AND ({CONFSIB_PODE_PREENCHER_SIB})
         """,
     ),
+    "ativo_inativo_confsib_reinclusao": FixPlan(
+        rule_id="ativo_inativo_confsib_reinclusao",
+        label="Ajustar POSANS para 8-REINCLUSAO",
+        summary=(
+            "Mesmo registro ATIVO na cadusu e INATIVO na confsib "
+            "(CCO + nome + CPF + nascimento + dataini), com CODCCO preenchido na cadusu "
+            "→ posans = 8-REINCLUSAO. Sem CCO na cadusu: nao atualiza. "
+            "Apos gravar, o id fica em 'aguardando retorno confsib' (SQLite) e "
+            "nao reaparece na listagem ate expirar a janela (~45 dias) ou a confsib atualizar."
+        ),
+        fields=("posans",),
+        preview_sql=f"""
+            SELECT c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.codcco,
+                   c.cpfusu, c.cns, c.sexousu, c.nascusu, c.dataini,
+                   c.posans AS posans_atual,
+                   '8-REINCLUSAO'::varchar AS posans_novo,
+                   'pendente de reinclusao'::text AS situacao_correcao
+            FROM cadusu c
+            WHERE COALESCE(TRIM(c.codcco), '') <> ''
+              AND c.id IN (
+                {ids_sql_fix_ativo_inativo_confsib()}
+              )
+            ORDER BY c.dataini DESC NULLS LAST, c.id
+            {_limit()}
+        """,
+        apply_sql=f"""
+            UPDATE cadusu c SET
+                posans = '8-REINCLUSAO',
+                {_AUDIT}
+            WHERE c.id = ANY(%s)
+              AND c.situusu = 'ATIVO'
+              AND c.posans <> '8-REINCLUSAO'
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND ({CAMPOS_OBRIGATORIOS_ANS_OK})
+              AND c.id IN (
+                {ids_sql_fix_ativo_inativo_confsib()}
+              )
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.codcco, c.posans
+        """,
+        count_sql=f"""
+            SELECT COUNT(*) AS total FROM (
+                {ids_sql_fix_ativo_inativo_confsib()}
+            ) q
+        """,
+    ),
+    "inativo_cadusu_ativo_confsib": FixPlan(
+        rule_id="inativo_cadusu_ativo_confsib",
+        label="Ajustar POSANS para 3-EXCLUSAO",
+        summary=(
+            "INATIVO na cadusu e ATIVO na confsib, com match por chave CCO "
+            "(+ compat. CPF/nome/nascimento) e datafim informada "
+            "→ posans = 3-EXCLUSAO. "
+            "Sem datafim: não atualiza. "
+            "Apos gravar, o id fica em 'aguardando retorno confsib' (SQLite) "
+            "ate a ANS processar a exclusao (em geral 30+ dias)."
+        ),
+        fields=("posans",),
+        preview_sql=f"""
+            SELECT c.id, c.codtit, c.codusu, c.nomeusu, c.situusu, c.codcco,
+                   c.datafim, c.posans AS posans_atual,
+                   '3-EXCLUSAO'::varchar AS posans_novo
+            FROM cadusu c
+            WHERE c.id IN (
+                {ids_sql_fix_inativo_ativo_confsib()}
+            )
+            ORDER BY c.id
+            {_limit()}
+        """,
+        apply_sql=f"""
+            UPDATE cadusu c SET
+                posans = '3-EXCLUSAO',
+                {_AUDIT}
+            WHERE c.id = ANY(%s)
+              AND c.situusu = 'INATIVO'
+              AND c.posans <> '3-EXCLUSAO'
+              AND c.datafim IS NOT NULL
+              AND COALESCE(TRIM(c.codcco), '') <> ''
+              AND c.id IN (
+                {ids_sql_fix_inativo_ativo_confsib()}
+              )
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.situusu,
+                      c.codcco, c.datafim, c.posans
+        """,
+        count_sql=f"""
+            SELECT COUNT(*) AS total FROM (
+                {ids_sql_fix_inativo_ativo_confsib()}
+            ) q
+        """,
+    ),
+    "ativo_cadusu_inativo_confsib": FixPlan(
+        rule_id="ativo_cadusu_inativo_confsib",
+        label="Conciliar com confsib (CCO + 4-ATUALIZADO)",
+        summary=(
+            "Mesma pessoa (nome+CPF+nasc+dataini+codusu/codans) ativa na cadusu "
+            "e inativa na confsib: posans=4-ATUALIZADO; se sem CCO, copia CODCCO "
+            "da confsib. Inclusões novas (campos divergentes) nao entram nesta regra."
+        ),
+        fields=("codcco", "posans"),
+        preview_sql=f"""
+            SELECT * FROM (
+                (
+                    SELECT c.id, c.codtit, c.codusu, c.codans, c.nomeusu, c.situusu,
+                           c.cpfusu, c.nascusu, c.dataini,
+                           ({DATAINI_CONFSIB}) AS dataini_ans,
+                           s.codusu AS codusu_ans,
+                           c.codcco AS codcco_atual,
+                           c.codcco AS codcco_novo,
+                           c.posans AS posans_atual,
+                           '4-ATUALIZADO'::varchar AS posans_novo,
+                           'validacao completa'::text AS motivo
+                    FROM cadusu c
+                    INNER JOIN (
+                        {CONFSIB_LATEST_BY_CCO}
+                    ) s ON s.codcco = c.codcco
+                    WHERE c.situusu = 'ATIVO'
+                      AND TRIM(s.status) = 'I'
+                      AND COALESCE(TRIM(c.codcco), '') <> ''
+                      AND c.posans <> '4-ATUALIZADO'
+                      AND {IDENTIDADE_VALIDACAO_COMPLETA}
+                )
+                UNION ALL
+                (
+                    SELECT DISTINCT ON (c.id)
+                           c.id, c.codtit, c.codusu, c.codans, c.nomeusu, c.situusu,
+                           c.cpfusu, c.nascusu, c.dataini,
+                           ({DATAINI_CONFSIB}) AS dataini_ans,
+                           s.codusu AS codusu_ans,
+                           c.codcco AS codcco_atual,
+                           TRIM(s.codcco) AS codcco_novo,
+                           c.posans AS posans_atual,
+                           '4-ATUALIZADO'::varchar AS posans_novo,
+                           'validacao completa - vincular CCO'::text AS motivo
+                    FROM cadusu c
+                    INNER JOIN confsib s
+                      ON REGEXP_REPLACE(COALESCE(s.cpfusu, ''), '[^0-9]', '', 'g')
+                       = REGEXP_REPLACE(COALESCE(c.cpfusu, ''), '[^0-9]', '', 'g')
+                     AND {NASC_IGUAL}
+                     AND TRIM(s.status) = 'I'
+                    WHERE c.situusu = 'ATIVO'
+                      AND c.posans = '1-INCLUSAO'
+                      AND COALESCE(TRIM(c.codcco), '') = ''
+                      AND COALESCE(TRIM(s.codcco), '') <> ''
+                      AND {IDENTIDADE_VALIDACAO_COMPLETA}
+                    ORDER BY c.id, s.numseq DESC
+                )
+            ) q
+            ORDER BY q.id
+            {_limit()}
+        """,
+        apply_sql=f"""
+            UPDATE cadusu c SET
+                codcco = COALESCE(
+                    CASE
+                      WHEN c.posans = '1-INCLUSAO'
+                           AND COALESCE(TRIM(c.codcco), '') = ''
+                        THEN (
+                          SELECT TRIM(s.codcco)
+                          FROM confsib s
+                          WHERE REGEXP_REPLACE(COALESCE(s.cpfusu, ''), '[^0-9]', '', 'g')
+                              = REGEXP_REPLACE(COALESCE(c.cpfusu, ''), '[^0-9]', '', 'g')
+                            AND {NASC_IGUAL}
+                            AND TRIM(s.status) = 'I'
+                            AND {IDENTIDADE_VALIDACAO_COMPLETA}
+                            AND COALESCE(TRIM(s.codcco), '') <> ''
+                          ORDER BY s.numseq DESC
+                          LIMIT 1
+                        )
+                      ELSE NULL
+                    END,
+                    c.codcco
+                ),
+                posans = '4-ATUALIZADO',
+                {_AUDIT}
+            WHERE c.id = ANY(%s)
+              AND c.id IN (
+                {ids_sql_fix_ativo_cadusu_inativo_confsib()}
+              )
+            RETURNING c.id, c.codtit, c.codusu, c.nomeusu, c.codcco, c.posans, c.dataini
+        """,
+        count_sql=f"""
+            SELECT COUNT(*) AS total FROM (
+                {ids_sql_fix_ativo_cadusu_inativo_confsib()}
+            ) q
+        """,
+    ),
 }
 
 
@@ -1426,8 +1941,13 @@ MANUAL_ONLY: dict[str, str] = {
         "Não há UPDATE automático seguro."
     ),
     "confsib_sem_cadusu": (
-        "Registro apenas na confsib — correção não é UPDATE em cadusu "
-        "(avaliar reinclusão cadastral ou descarte do retorno)."
+        "Registro ATIVO apenas na confsib - correção não é UPDATE em cadusu "
+        "(avaliar inclusão/reinclusão cadastral ou descarte do retorno)."
+    ),
+    "confsib_sem_cadusu_inativo": (
+        "Registro INATIVO apenas na confsib - em geral legado de baixa na ANS "
+        "sem espelho local. Sem UPDATE automático; avaliar cadastro histórico "
+        "ou descarte."
     ),
     "cco_duplicado": (
         "Duplicidade de CCO exige decisão cadastral (qual vínculo manter). Sem UPDATE em massa."
@@ -1444,6 +1964,84 @@ MANUAL_ONLY: dict[str, str] = {
         "use a regra 'CPF inválido para a data de nascimento' para limpar "
         "o CPF dos cadastros inconsistentes."
     ),
+    "nome_mae_invalido": (
+        "Corrigir manualmente nomeusu/mae: remover números e informar "
+        "nome completo da mãe (nome + sobrenome). Sem UPDATE automático."
+    ),
+}
+
+
+# Dicas exibidas no hover da area de correcao (tela).
+FIX_TIPS: dict[str, str] = {
+    "divergencia_nome_cadusu_confsib": (
+        "Nome ja validado por humano na Receita Federal: manter cadusu.nomeusu "
+        "(nao acatar confsib). Correcao: ansnome=1 e posans=10-SIB-FLEX "
+        "para enviar o nome a ANS na proxima competencia; "
+        "se titular (codusu=00) e nometit divergir do nome local, alinhar "
+        "cadcont.nometit ao nomeusu. Apos preparar, o registro sai da lista "
+        "ate o retorno da confsib."
+    ),
+    "divergencia_nome_inativo_confsib": (
+        "INATIVO: a base local acata o nome da confsib (retorno ANS). "
+        "Nao se envia retificacao de nome para beneficiario inativo."
+    ),
+    "exclusao_cco_ja_inativo_confsib": (
+        "CCO ja inativo na ANS (confsib status=I): nao reenviar 3-EXCLUSAO. "
+        "Correcao: posans=4-ATUALIZADO."
+    ),
+    "inativo_com_cco_nao_excluido": (
+        "Se confsib ja esta I, usar 4-ATUALIZADO. "
+        "So gerar 3-EXCLUSAO quando a confsib ainda esta A (ou sem retorno)."
+    ),
+    "cpf_inclusao_ja_ativo_confsib": (
+        "Somente mesma pessoa (CPF ativo na confsib + dataini e nome iguais): "
+        "vincular CCO e posans=4-ATUALIZADO. "
+        "Dataini/nome diferentes = inclusao nova (fora desta critica)."
+    ),
+    "reativacao_cco_ja_ativo_confsib": (
+        "CCO ja ativo na ANS: nao enviar 8-REINCLUSAO/9-RET REATIV. "
+        "Alinhar local: ATIVO + 4-ATUALIZADO. "
+        "Se a meta for excluir, use a regra inativo cadusu / ativo confsib."
+    ),
+    "ativo_cadusu_inativo_confsib": (
+        "Somente mesma pessoa (nome+CPF+nasc+dataini+codusu/codans). "
+        "Correcao: posans=4-ATUALIZADO; sem CCO, copia da confsib. "
+        "1-INCLUSAO com campos divergentes e inclusao nova - fora desta critica."
+    ),
+    "ativo_sem_cco_fora_inclusao": (
+        "So lista apos o prazo ANS da dataini (envio ate o dia 5 do mes seguinte). "
+        "Ex.: dataini 01/10/2026 — prazo ate 05/11/2026; antes disso nao aparece. "
+        "Correcao: posans=1-INCLUSAO."
+    ),
+    "reinclusao_antiga_com_cco": (
+        "Reinclusao >90 dias com CCO: posans=4-ATUALIZADO. "
+        "Se match exato com confsib (CCO+nome+CPF+nasc+dataini) e datafim preenchida, "
+        "limpa datafim na cadusu (residuo de exclusao previa)."
+    ),
+    "ativo_inativo_confsib_reinclusao": (
+        "Apos gravar 8-REINCLUSAO, o id entra no SQLite local "
+        "'aguardando retorno confsib' (~45 dias) e some da listagem "
+        "para nao haver reaplicacao enquanto a ANS nao atualiza."
+    ),
+    "inativo_cadusu_ativo_confsib": (
+        "Apos gravar 3-EXCLUSAO, o id entra no SQLite local "
+        "'aguardando retorno confsib' (~45 dias) e nao reaparece "
+        "na critica ate a ANS processar a baixa."
+    ),
+}
+
+# Badges extras na lista/detalhe da regra (texto curto + classe CSS).
+FIX_BADGES: dict[str, list[dict[str, str]]] = {
+    "divergencia_nome_cadusu_confsib": [
+        {
+            "label": "Enviar nome cadusu (RF → ANS)",
+            "class": "rf-block",
+            "title": (
+                "Nome local já checado na Receita Federal por humano. "
+                "Não sobrescrever com confsib; ansnome=1 + 10-SIB-FLEX."
+            ),
+        }
+    ],
 }
 
 
@@ -1453,12 +2051,16 @@ def get_fix_plan(rule_id: str) -> FixPlan | None:
 
 def fix_meta(rule_id: str) -> dict[str, Any]:
     plan = get_fix_plan(rule_id)
+    tip = FIX_TIPS.get(rule_id)
+    badges = list(FIX_BADGES.get(rule_id, []))
     if plan:
         return {
             "fixable": True,
             "fix_label": plan.label,
             "fix_summary": plan.summary,
             "fix_fields": list(plan.fields),
+            "fix_tip": tip or plan.summary,
+            "ui_badges": badges,
             "manual_reason": None,
         }
     return {
@@ -1466,6 +2068,8 @@ def fix_meta(rule_id: str) -> dict[str, Any]:
         "fix_label": None,
         "fix_summary": None,
         "fix_fields": [],
+        "fix_tip": tip,
+        "ui_badges": badges,
         "manual_reason": MANUAL_ONLY.get(
             rule_id,
             "Esta regra não possui correção automática cadastrada.",
@@ -1483,18 +2087,44 @@ def _serialize(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _fix_sqls(plan: FixPlan, rule_id: str) -> tuple[str, str, str]:
+    """Retorna (preview_sql, apply_sql, count_sql) com exclusão SQLite se aplicável."""
+    preview_sql = inject_pending_exclusion(plan.preview_sql, rule_id)
+    apply_sql = inject_pending_exclusion(plan.apply_sql, rule_id)
+    if not is_await_rule(rule_id):
+        return preview_sql, apply_sql, plan.count_sql
+
+    if rule_id == "ativo_inativo_confsib_reinclusao":
+        ids_sql = ids_sql_fix_ativo_inativo_confsib()
+    elif rule_id == "inativo_cadusu_ativo_confsib":
+        ids_sql = ids_sql_fix_inativo_ativo_confsib()
+    else:
+        return preview_sql, apply_sql, plan.count_sql
+
+    excl = sql_exclude_pending(rule_id, id_expr="q.id")
+    count_sql = f"""
+            SELECT COUNT(*) AS total FROM (
+                {ids_sql}
+            ) q
+            WHERE TRUE
+            {excl}
+        """
+    return preview_sql, apply_sql, count_sql
+
+
 def preview_fix(rule_id: str, ids: list[int] | None = None) -> dict[str, Any]:
     plan = get_fix_plan(rule_id)
     if not plan:
         meta = fix_meta(rule_id)
         raise ValueError(meta["manual_reason"] or "Correção automática indisponível.")
 
-    rows = fetch_all(plan.preview_sql)
+    preview_sql, _, count_sql = _fix_sqls(plan, rule_id)
+    rows = fetch_all(preview_sql)
     if ids:
         id_set = set(int(i) for i in ids)
         rows = [r for r in rows if int(r["id"]) in id_set]
 
-    total_eligible = fetch_count(plan.count_sql)
+    total_eligible = fetch_count(count_sql)
     return {
         "rule_id": rule_id,
         "fixable": True,
@@ -1525,11 +2155,17 @@ def apply_fix(rule_id: str, ids: list[int], confirm: bool = False) -> dict[str, 
     if len(clean_ids) > Config.MAX_ROWS:
         raise ValueError(f"Limite de {Config.MAX_ROWS} registros por gravação.")
 
-    updated = execute_returning(plan.apply_sql, (clean_ids,))
+    _, apply_sql, _ = _fix_sqls(plan, rule_id)
+    updated = execute_returning(apply_sql, (clean_ids,))
+    pending_registered = 0
+    if is_await_rule(rule_id) and updated:
+        pending_registered = register_pending(rule_id, updated)
+
     return {
         "rule_id": rule_id,
         "requested": len(clean_ids),
         "updated": len(updated),
         "label": plan.label,
+        "pending_confsib_registered": pending_registered,
         "rows": [_serialize(r) for r in updated],
     }

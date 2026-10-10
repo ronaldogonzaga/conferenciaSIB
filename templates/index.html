@@ -33,13 +33,17 @@
 
   <main>
     <section class="stats" id="stats" aria-label="Totais">
-      <article class="stat">
+      <article class="stat src-cadusu">
         <span class="stat-label">cadusu</span>
         <span class="stat-value" id="st-cadusu">—</span>
       </article>
-      <article class="stat">
+      <article class="stat src-confsib">
         <span class="stat-label">confsib</span>
         <span class="stat-value" id="st-confsib">—</span>
+      </article>
+      <article class="stat src-pending">
+        <span class="stat-label">Aguardando confsib</span>
+        <span class="stat-value" id="st-pending">—</span>
       </article>
       <article class="stat">
         <span class="stat-label">Ativos</span>
@@ -57,6 +61,64 @@
         <span class="stat-label">Registros flagados</span>
         <span class="stat-value" id="st-flagados">—</span>
       </article>
+    </section>
+
+    <section class="panel rpx-panel" id="rpx-panel" aria-label="Arquivo retorno SIB">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Retorno ANS</p>
+          <h2>Arquivo retorno (.RPX)</h2>
+        </div>
+      </div>
+      <div class="rpx-body">
+        <p class="detail-desc">
+          Informe o caminho do arquivo XML de resultado do processamento SIB
+          (ex.: <code>\\servidor\c$\Mplan\382281….RPX</code>) ou envie o arquivo.
+        </p>
+        <form id="rpx-form" class="rpx-form" autocomplete="off">
+          <label class="rpx-field">
+            <span>Caminho do arquivo retorno</span>
+            <input
+              type="text"
+              id="rpx-path"
+              name="path"
+              placeholder="\\10.0.0.205\c$\Mplan\38228120261002160222.RPX"
+              value="{{ rpx_default_path }}\38228120261002160222.RPX"
+              spellcheck="false"
+            />
+          </label>
+          <label class="rpx-field rpx-file">
+            <span>Ou upload</span>
+            <input type="file" id="rpx-file" name="file" accept=".RPX,.rpx,.xml,application/xml,text/xml" />
+          </label>
+          <button type="submit" id="btn-rpx-parse" class="btn primary">Ler críticas</button>
+        </form>
+        <div id="rpx-error" class="alert error hidden"></div>
+        <div id="rpx-ok" class="alert ok hidden"></div>
+        <div id="rpx-summary" class="rpx-summary hidden"></div>
+        <div id="rpx-errors-list" class="rpx-errors-list hidden"></div>
+        <div class="table-wrap rpx-table-wrap hidden" id="rpx-table-wrap">
+          <div class="rpx-table-toolbar">
+            <label>
+              Filtrar código
+              <select id="rpx-filter-code">
+                <option value="">Todos</option>
+              </select>
+            </label>
+            <label>
+              Filtrar movimento
+              <select id="rpx-filter-mov">
+                <option value="">Todos</option>
+              </select>
+            </label>
+            <span id="rpx-table-meta" class="muted"></span>
+          </div>
+          <table id="rpx-table" class="data-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <section class="layout">
@@ -99,6 +161,10 @@
         <div id="detail-meta" class="detail-meta hidden"></div>
         <div id="detail-error" class="alert error hidden"></div>
         <div id="detail-ok" class="alert ok hidden"></div>
+        <div id="source-legend" class="source-legend hidden" aria-hidden="true">
+          <span class="src-chip src-cadusu">cadusu</span>
+          <span class="src-chip src-confsib">confsib · ANS</span>
+        </div>
         <div class="table-wrap">
           <table id="detail-table" class="data-table">
             <thead></thead>
@@ -130,6 +196,10 @@
           Selecionar todos
         </label>
         <span id="fix-modal-meta" class="muted"></span>
+      </div>
+      <div id="fix-source-legend" class="source-legend hidden" aria-hidden="true">
+        <span class="src-chip src-cadusu">cadusu</span>
+        <span class="src-chip src-confsib">confsib · ANS</span>
       </div>
       <div class="table-wrap modal-table">
         <table id="fix-table" class="data-table">

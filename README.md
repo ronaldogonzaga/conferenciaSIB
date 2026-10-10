@@ -20,6 +20,32 @@ Apoiar a equipe responsável pelo envio e manutenção de dados na ANS a:
 
 ---
 
+## Campos obrigatórios SIB / ANS
+
+Para envio e manutenção correta do beneficiário no SIB, os seguintes dados são considerados **obrigatórios** (conforme regras de negócio da conferência):
+
+| Campo | Observação |
+|-------|------------|
+| Nome do Beneficiário | Identificação principal |
+| Data de Nascimento | |
+| Sexo | |
+| CPF | Obrigatório na maioria dos casos |
+| CNS (Cartão Nacional de Saúde) | Pode complementar/substituir o CPF em cenários específicos |
+| Nome da Mãe | Ou **PIS/PASEP/NIT**, se preenchido |
+| DN (Declaração de Nascido Vivo) | Para **menores sem CPF** |
+| Logradouro | Endereço |
+| Número do Logradouro | Endereço |
+| Bairro | Endereço |
+| Código do Município no IBGE | Endereço |
+| UF | Endereço |
+| CEP | Endereço |
+| Data de Contratação do Plano | Início do vínculo (`DATAINI`) |
+| Tipo de Relação de Dependência | Parentesco / vínculo com o titular |
+
+Algumas correções automáticas da aplicação (por exemplo, reinclusão com `posans = 8-REINCLUSAO`) só são aplicadas quando há **CCO** e um subconjunto desses campos essenciais já preenchidos na `cadusu` (nome, nascimento, sexo e CPF ou CNS). Ausência dos demais campos pode gerar rejeição ou inconsistência no retorno da ANS (`confsib`).
+
+---
+
 ## Tecnologias
 
 | Camada | Tecnologia |
