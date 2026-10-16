@@ -25,6 +25,7 @@ html, body {
   min-height: 100%;
   font-family: var(--font);
   color: var(--ink);
+  overflow-x: auto;
   background:
     radial-gradient(1200px 600px at 10% -10%, #d9ecea 0%, transparent 55%),
     radial-gradient(900px 500px at 100% 0%, #f0e2d4 0%, transparent 50%),
@@ -135,7 +136,12 @@ html, body {
   color: var(--ink);
 }
 
-main { padding: 0 2rem 2rem; position: relative; }
+main {
+  padding: 0 2rem 2rem;
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
 
 .stats {
   display: grid;
@@ -195,9 +201,10 @@ main { padding: 0 2rem 2rem; position: relative; }
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(320px, 420px) 1fr;
+  grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
   gap: 1rem;
   min-height: 60vh;
+  min-width: 0;
   animation: rise 0.75s 0.1s ease both;
 }
 
@@ -211,6 +218,12 @@ main { padding: 0 2rem 2rem; position: relative; }
   display: flex;
   flex-direction: column;
   min-height: 520px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.detail-panel {
+  min-width: 0;
 }
 
 .panel-head {
@@ -351,12 +364,19 @@ main { padding: 0 2rem 2rem; position: relative; }
 .table-wrap {
   position: relative;
   overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   padding: 0.5rem;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .data-table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 0.8rem;
 }
@@ -584,6 +604,7 @@ main { padding: 0 2rem 2rem; position: relative; }
 
 .modal-card {
   width: min(1100px, 100%);
+  max-width: 100%;
   max-height: min(90vh, 860px);
   display: flex;
   flex-direction: column;
@@ -592,6 +613,7 @@ main { padding: 0 2rem 2rem; position: relative; }
   border-radius: 16px;
   box-shadow: 0 24px 60px rgba(26, 35, 50, 0.25);
   overflow: hidden;
+  min-width: 0;
   animation: rise 0.25s ease both;
 }
 
@@ -626,6 +648,8 @@ main { padding: 0 2rem 2rem; position: relative; }
 .modal-table {
   flex: 1;
   min-height: 200px;
+  min-width: 0;
+  overflow: auto;
 }
 
 .check-all {
@@ -835,6 +859,8 @@ main { padding: 0 2rem 2rem; position: relative; }
 
 .rpx-table-wrap {
   max-height: 420px;
+  min-width: 0;
+  overflow: auto;
 }
 
 .rpx-body code {

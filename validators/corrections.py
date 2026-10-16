@@ -1751,7 +1751,8 @@ FIX_PLANS: dict[str, FixPlan] = {
             "(CCO + nome + CPF + nascimento + dataini), com CODCCO preenchido na cadusu "
             "→ posans = 8-REINCLUSAO. Sem CCO na cadusu: nao atualiza. "
             "Apos gravar, o id fica em 'aguardando retorno confsib' (SQLite) e "
-            "nao reaparece na listagem ate expirar a janela (~45 dias) ou a confsib atualizar."
+            "nao reaparece na listagem ate expirar a janela (~45 dias) ou a "
+            "confsib refletir status A com numseq novo (auto-resolve)."
         ),
         fields=("posans",),
         preview_sql=f"""
@@ -1797,7 +1798,7 @@ FIX_PLANS: dict[str, FixPlan] = {
             "→ posans = 3-EXCLUSAO. "
             "Sem datafim: não atualiza. "
             "Apos gravar, o id fica em 'aguardando retorno confsib' (SQLite) "
-            "ate a ANS processar a exclusao (em geral 30+ dias)."
+            "ate a ANS processar a exclusao (status I com numseq novo, ou ~45 dias)."
         ),
         fields=("posans",),
         preview_sql=f"""
@@ -2020,13 +2021,15 @@ FIX_TIPS: dict[str, str] = {
     ),
     "ativo_inativo_confsib_reinclusao": (
         "Apos gravar 8-REINCLUSAO, o id entra no SQLite local "
-        "'aguardando retorno confsib' (~45 dias) e some da listagem "
-        "para nao haver reaplicacao enquanto a ANS nao atualiza."
+        "'aguardando retorno confsib' (~45 dias) e some da listagem. "
+        "Quando a confsib voltar status A com numseq maior que o da correcao, "
+        "a pendencia e auto-resolvida."
     ),
     "inativo_cadusu_ativo_confsib": (
         "Apos gravar 3-EXCLUSAO, o id entra no SQLite local "
-        "'aguardando retorno confsib' (~45 dias) e nao reaparece "
-        "na critica ate a ANS processar a baixa."
+        "'aguardando retorno confsib' (~45 dias). "
+        "Quando a confsib voltar status I com numseq maior que o da correcao, "
+        "a pendencia e auto-resolvida."
     ),
 }
 

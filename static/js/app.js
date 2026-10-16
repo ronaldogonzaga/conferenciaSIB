@@ -204,9 +204,21 @@
     const pending = t.pending_confsib?.total_aguardando;
     if (els.stPending) {
       els.stPending.textContent = fmt(pending);
+      const p = t.pending_confsib || {};
+      const numseqPart =
+        p.confsib_max_numseq != null
+          ? ` · confsib MAX(numseq)=${p.confsib_max_numseq}`
+          : "";
+      const refreshPart = p.confsib_refreshed
+        ? " · nova carga detectada"
+        : "";
+      const autoPart =
+        p.auto_resolved > 0
+          ? ` · ${p.auto_resolved} auto-resolvido(s)`
+          : "";
       els.stPending.title = pending
-        ? `Correções aguardando retorno confsib (~${t.pending_confsib?.wait_days || 45} dias)`
-        : "Nenhuma correção aguardando retorno confsib";
+        ? `Correções aguardando retorno confsib (~${p.wait_days || 45} dias)${numseqPart}${refreshPart}${autoPart}`
+        : `Nenhuma correção aguardando retorno confsib${numseqPart}${refreshPart}${autoPart}`;
     }
     els.stAtivos.textContent = fmt(t.ativos);
     els.stInativos.textContent = fmt(t.inativos);

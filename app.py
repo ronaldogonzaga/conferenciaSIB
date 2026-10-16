@@ -6,7 +6,7 @@ from config import Config
 from db import fetch_all, test_connection
 from parsers.rpx_fixes import apply_rpx_fix, preview_rpx_fix
 from parsers.rpx_retorno import parse_rpx
-from pending_confsib import list_pending, pending_summary, resolve_ids
+from pending_confsib import list_pending, pending_summary, resolve_ids, sync_confsib_state
 from validators.corrections import apply_fix, fix_meta, preview_fix
 from validators.sib_rules import count_rule, dashboard_totals, detail_rule, list_rules, summarize_all
 
@@ -131,6 +131,16 @@ def api_pending_confsib_resolve():
     try:
         n = resolve_ids(rule_id, ids, note=body.get("note") or "resolvido manualmente")
         return jsonify({"ok": True, "resolved": n, "summary": pending_summary()})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.post("/api/pending-confsib/sync")
+def api_pending_confsib_sync():
+    """Força releitura do MAX(numseq) da confsib e auto-resolve pendências refletidas."""
+    try:
+        sync = sync_confsib_state(force=True)
+        return jsonify({"ok": True, "sync": sync, "summary": pending_summary()})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
